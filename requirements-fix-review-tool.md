@@ -5,34 +5,44 @@
 Tách biệt hoàn toàn 2 trách nhiệm, không được gộp:
 
 - **Data Resolver**: code thường (Python/Java/Bash), KHÔNG gọi kiro-cli, KHÔNG dùng LLM dưới bất kỳ hình thức nào. Đọc và resolve toàn bộ dữ liệu cần thiết, đảm bảo 100% đầy đủ hoặc raise lỗi rõ ràng (fail loudly, không skip âm thầm).
-- **LLM Reviewer**: gọi `kiro-cli chat --no-interactive` với 1 custom agent cấu hình `"tools": []` (rỗng hoàn toàn, không chỉ để trống `allowedTools`). Toàn bộ dữ liệu đã resolve được đưa vào qua **stdin**, agent không được có bất kỳ quyền đọc file/tool nào.
+- **LLM Reviewer**: gọi `kiro-cli chat --no-interactive` với 1 custom agent cấu hình `"tools": []` (rỗng hoàn toàn, không chỉ để trống `allowedTools`). Toàn bộ dữ liệu đã resolve được nạp vào context của agent qua field `resources` trong agent config (xem cách cụ thể ở mục 2.1) — không dùng tool để agent tự đọc, không dùng stdin (model không có khả năng tự đọc stdin, và kiro-cli không tự merge stdin vào context của custom agent).
 
 ## 2. Cách gọi Kiro CLI (headless mode)
 
-**Agent config** `.kiro/agents/testcase-reviewer.json`:
+**Cơ chế nạp context**: dùng field `resources` (`file://<path>`) trong agent config — nội dung file được nạp thẳng vào context ngay khi agent khởi động, không cần tool call, giữ nguyên tính deterministic. Vì mỗi testcase chạy song song (mục 4.5) cần data khác nhau, **phải sinh 1 agent config riêng cho mỗi lời gọi** (không dùng chung 1 path cố định, tránh race condition giữa các process chạy đồng thời).
+
+**Bước 1 — Data Resolver ghi context ra file riêng theo testcase**:
+```
+/tmp/kiro-review/context_TC005.json   ← nội dung đã resolve của TC005
+```
+
+**Bước 2 — Script điều phối sinh agent config riêng cho lời gọi này**, ví dụ `/tmp/kiro-review/agents/testcase-reviewer_TC005.json`:
 
 ```json
 {
-  "name": "testcase-reviewer",
+  "name": "testcase-reviewer_TC005",
   "description": "Review testcase data so với source code, không truy cập file/tool nào",
   "tools": [],
   "allowedTools": [],
   "model": "claude-sonnet-5",
-  "prompt": "<toàn bộ instruction ở mục 5-6: schema output, quy tắc location+reason, danh sách loại lỗi cần kiểm tra. Chỉ đánh giá dựa trên nội dung nhận qua input, không giả định hay bịa dữ liệu ngoài input.>"
+  "resources": ["file:///tmp/kiro-review/context_TC005.json"],
+  "prompt": "<toàn bộ instruction ở mục 5-6: schema output, quy tắc location+reason, danh sách loại lỗi cần kiểm tra. Chỉ đánh giá dựa trên nội dung đã nạp qua resources, không giả định hay bịa dữ liệu ngoài đó.>"
 }
 ```
 
-**Lệnh gọi**:
+**Bước 3 — Gọi kiro-cli, trỏ tới agent config vừa sinh**:
 
 ```bash
-cat resolved_context_TC005.json | kiro-cli chat --no-interactive --agent testcase-reviewer "Review testcase TC005 theo instructions đã cấu hình trong agent"
+kiro-cli chat --no-interactive --agent /tmp/kiro-review/agents/testcase-reviewer_TC005.json "Review testcase TC005 theo instructions đã cấu hình trong agent"
 ```
+
+**Dọn dẹp**: sau khi lấy được output, xoá 2 file tạm (context + agent config) của testcase đó để không tồn đọng.
 
 **Output có cấu trúc**: agent chỉ được in ra đúng 1 khối JSON bọc giữa 2 marker cố định (`<<<RESULT_JSON>>> ... <<<END_RESULT_JSON>>>`). Script bên ngoài parse stdout, trích phần giữa marker, validate theo schema (mục 5.5/6.3).
 
-**Retry**: nếu parse/validate thất bại → gọi lại `kiro-cli chat --no-interactive` tối đa N lần (2-3 lần), kèm lỗi validate cụ thể vào prompt lần gọi lại. Thất bại sau N lần → ghi lỗi rõ ràng vào report, không trả kết quả rỗng/mặc định.
+**Retry**: nếu parse/validate thất bại → gọi lại `kiro-cli chat --no-interactive` tối đa N lần (2-3 lần), kèm lỗi validate cụ thể vào prompt lần gọi lại (có thể ghi đè thêm 1 field vào context file hoặc thêm vào chuỗi prompt gọi lại). Thất bại sau N lần → ghi lỗi rõ ràng vào report, không trả kết quả rỗng/mặc định.
 
-**Concurrency**: mỗi lời gọi per-testcase là 1 process riêng — giới hạn số process chạy song song (ví dụ `xargs -P` hoặc queue trong script điều phối).
+**Concurrency**: mỗi lời gọi per-testcase là 1 process riêng, với context file + agent config file riêng (theo `testcase_key`, không dùng path cố định) — an toàn khi chạy song song. Giới hạn số process chạy đồng thời (ví dụ `xargs -P` hoặc queue trong script điều phối).
 
 ## 3. Data Resolver
 
@@ -168,7 +178,7 @@ Review riêng biệt, khác với mục 5 (mục 5 review data testcase, mục n
 ### 6.1 Input
 - Toàn bộ source code framework/base class đọc CSV + thực hiện assertion (code dùng chung, không phải 1 class cụ thể).
 - Danh sách toàn bộ tên cột đã từng xuất hiện trong các file CSV thực tế.
-- Đưa qua stdin, cùng agent `"tools": []` như mục 2.
+- Nạp qua `resources` trong agent config (không dùng stdin, không nhúng prompt — xem cách làm ở mục 2), cùng agent `"tools": []` như mục 2. Vì đây là review 1 lần khi framework code đổi (không chạy song song nhiều lời gọi như mục 4.5), có thể dùng 1 path cố định cho context + agent config, không cần sinh riêng theo từng lần như per-testcase.
 
 ### 6.2 Danh sách kiểm tra bắt buộc
 
@@ -221,10 +231,11 @@ Phân biệt rõ 4 loại kết quả, không gộp chung:
 2. Không testcase nào bị bỏ sót khỏi report (dù OK hay FAILED).
 3. Output review luôn đúng schema JSON đã định nghĩa, 100% parse được, không cần sửa tay.
 4. Log chi tiết từng bước resolve (file nào đã đọc, giá trị gì) để audit lại khi cần.
-5. Verify agent `testcase-reviewer` thực sự 0 tool được load:
+5. Verify agent sinh ra (bất kỳ file agent config nào theo mẫu mục 2.1) thực sự 0 tool được load — kiểm tra trên 1 file agent config mẫu:
    ```bash
-   kiro-cli agent validate .kiro/agents/testcase-reviewer.json
-   kiro-cli chat --agent testcase-reviewer
+   kiro-cli agent validate /tmp/kiro-review/agents/testcase-reviewer_TC005.json
+   kiro-cli chat --agent /tmp/kiro-review/agents/testcase-reviewer_TC005.json
    # gõ: /tools   → phải hiện danh sách rỗng
    ```
    Kiểm tra lại mỗi khi nâng version kiro-cli.
+6. Verify `resources` thực sự được nạp vào context: gọi thử 1 lần, hỏi lại agent nội dung cụ thể có trong context file (ví dụ hỏi `testcase_key` là gì) — agent phải trả lời đúng dựa trên nội dung đã nạp qua `resources`, không báo thiếu context.
