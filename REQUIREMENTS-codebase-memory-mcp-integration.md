@@ -137,21 +137,43 @@ pip install --no-index --find-links=./crg-offline-bundle code-review-graph
 code-review-graph update --repo "$REPO_PATH"    # incremental, nhanh — build lần đầu dùng `build`
 ```
 
-**Lấy risk score + test gap:**
+**Lấy risk score + test gap — KHÔNG dùng CLI `detect-changes` trực tiếp, dùng wrapper Python để git-mcp là nguồn `changed_files` DUY NHẤT:**
 
-```bash
-code-review-graph detect-changes --repo "$REPO_PATH" --base "$BASE_SHA"
+**Đã đổi thiết kế so với bản trước** — lý do: CLI `detect-changes --base X` tự chạy git diff nội bộ để **tự xác định** danh sách file thay đổi, mâu thuẫn với nguyên tắc đã chốt "git-mcp là nguồn duy nhất cho `changed_files`" (mục 2 bước 2). Đã verify: hàm Python nội bộ `detect_changes_func` (mà CLI gọi bên dưới) **chấp nhận `changed_files` truyền vào trực tiếp**, bỏ qua hoàn toàn việc tự dò file — chỉ là CLI không expose tham số này ra ngoài. Cùng dạng vấn đề đã gặp với tính năng Flow (mục 10.2) — cách xử lý giống hệt: viết wrapper Python mỏng.
+
+```python
+# crg_detect_changes.py — Service gọi như 1 CLI tool:
+#   python crg_detect_changes.py --repo <path> --base <BASE_SHA> --files a.go,b.py,...
+import sys, json, argparse
+from code_review_graph.tools.review import detect_changes_func
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", required=True)
+parser.add_argument("--base", required=True)
+parser.add_argument("--files", required=True, help="Danh sách file, phân cách bằng dấu phẩy — LẤY TỪ git-mcp, không để tool tự dò")
+args = parser.parse_args()
+
+result = detect_changes_func(
+    changed_files=args.files.split(","),   # <-- nguồn DUY NHẤT là git-mcp, không None
+    base=args.base,                         # <-- SHA bất biến, chỉ dùng để tính line-range nội bộ (mục dưới)
+    repo_root=args.repo,
+)
+print(json.dumps(result))
 ```
 
-**Lưu ý quan trọng:** CLI `detect-changes` **không có flag nhận danh sách file trực tiếp** (đã verify: `--help` chỉ có `--base/--brief/--repo/--churn/--verify`) — tool vẫn tự tính `git diff` nội bộ dựa trên `--base`, không phải "nhận file list từ bước 2" như cách hiểu ban đầu. Điều này **vẫn an toàn** vì `--base` ở đây được truyền `$BASE_SHA` (SHA bất biến, không phải tên branch) — rủi ro merge-base sai (đã bàn ở phần git-mcp) chỉ xảy ra với tên branch có thể "trôi", không xảy ra khi so sánh 2 SHA cố định. Luôn truyền `$BASE_SHA`/`$REPO_PATH` tường minh, không dựa vào auto-detect cwd của tool trong môi trường pipeline tự động.
+**Đã verify thật** (build graph cho 1 repo test, sửa 1 hàm, gọi wrapper với `changed_files` truyền tay) — kết quả đúng chính xác: nhận diện đúng hàm `validate` bị đổi (đúng dòng sửa), `risk_score: 0.8`, `affected_flows` trace đúng. Xác nhận cách này hoạt động chính xác, không phải chỉ lý thuyết.
 
-Output mẫu (đã verify thật trên chính repo `codebase-memory-mcp`):
+**Lưu ý quan trọng còn lại:** dù đã bypass việc TỰ DÒ `changed_files`, hàm này **vẫn gọi 1 lần `git diff` nội bộ khác** (`parse_diff_ranges`, dùng chính `base` được truyền vào) để tính **line-range cụ thể** trong từng file — cần cho việc xác định chính xác function nào bị đổi, không chỉv file nào. Lệnh git nội bộ này **vẫn an toàn** vì `base` là `$BASE_SHA` bất biến (không phải tên branch) — không phải rủi ro merge-base như đã bàn trước đây, chỉ là dùng để tính line-range, không dùng để xác định lại danh sách file (danh sách file đã cố định từ tham số `changed_files`).
+
+Output mẫu (đã verify thật):
 ```json
 {
   "risk_score": 0.8,
+  "changed_files": ["handler.go"],
   "changed_functions": [
-    {"name": "bind_text", "qualified_name": "...", "is_test": false, "risk_score": 0.65}
+    {"name": "validate", "qualified_name": "...", "is_test": false, "risk_score": 0.8, "line_start": 5, "line_end": 7}
   ],
+  "affected_flows": [...],
   "test_gaps": [...]
 }
 ```
@@ -358,7 +380,7 @@ Mỗi service (trong 11 service) có 1 repo component-test riêng, tách biệt 
 
 ### 9.1 Pha 1 — tín hiệu thô (đã có sẵn từ bước 3, không tốn thêm lời gọi)
 
-`code-review-graph detect-changes` (mục 4.2) đã trả về `test_gaps` — danh sách hàm thay đổi **không có test cover trong chính service repo** (đã verify thật: ví dụ output `Untested: cbm_writer_open, bind_text...`). Dùng ngay tín hiệu này làm điều kiện trigger, không cần tính toán thêm gì mới.
+Wrapper `crg_detect_changes.py` (mục 4.2) đã trả về `test_gaps` — danh sách hàm thay đổi **không có test cover trong chính service repo** (đã verify thật: ví dụ output `Untested: cbm_writer_open, bind_text...`). Dùng ngay tín hiệu này làm điều kiện trigger, không cần tính toán thêm gì mới.
 
 **Điều kiện trigger Pha 2:** `test_gaps` không rỗng CHO các hàm nằm trong `changed_functions` của PR, HOẶC `crg_risk_score >= 70`.
 
@@ -572,7 +594,7 @@ Khác với `impact_context` (chỉ code snippet cho symbol risk cao nhất), t�
 - [ ] Khi 1 nguồn lỗi/không tính được → `final_score` vẫn tính từ các nguồn còn lại, không crash toàn bộ pipeline
 - [ ] `code-review-graph` cài trên Server qua bundle offline (`pip download --only-binary=:all:` trên máy có mạng, chuyển bundle, `pip install --no-index`) — không cài nhóm optional (embeddings/wiki)
 - [ ] Đã tạo `.code-review-graphignore` cho repo trước khi đưa vào pipeline chính thức; đã kiểm tra `status` sau build đầu không có edge count bất thường
-- [ ] `code-review-graph detect-changes` nhận `changed_files`/`base` từ git-mcp, không tự tính diff nội bộ lệch với nguồn khác
+- [ ] Dùng wrapper `crg_detect_changes.py` (gọi `detect_changes_func` trực tiếp), KHÔNG dùng CLI `code-review-graph detect-changes` — `changed_files` truyền tay từ git-mcp, không để tool tự dò git diff cho danh sách file (chỉ còn 1 lệnh git nội bộ để tính line-range, dùng đúng `$BASE_SHA` truyền vào, không tự xác định lại file list)
 - [ ] `codebase-memory-mcp` chỉ được gọi cho phần cross-service (không lặp lại việc tính risk score trong-service đã có ở `code-review-graph`)
 - [ ] Context file (mục 5.2) chứa đủ field, ghi ra path riêng theo `pr_number`
 - [ ] Knowledge/skill lọc theo domain; file nhỏ qua `resources`, file lớn cắt excerpt — không trùng lặp giữa 2 nơi
