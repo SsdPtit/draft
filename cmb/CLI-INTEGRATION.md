@@ -1,241 +1,235 @@
 # Tài liệu CLI chi tiết — cho hệ thống tích hợp qua CLI
 
 Tài liệu này tập trung vào việc **gọi trực tiếp qua CLI** (không qua MCP
-client), dùng cho pipeline/hệ thống tự động hoá gọi `codebase-memory-mcp` như
-một binary thông thường. Thông tin lấy trực tiếp từ source (`src/main.c`,
-`src/cli/cli.c`, `src/mcp/mcp.c`), không phải đoán.
+client), dùng cho pipeline/hệ thống tự động hoá gọi `crg`/`code-review-graph`
+như một binary/CLI thông thường. Thông tin lấy trực tiếp từ source
+(`code_review_graph/cli.py`), không phải đoán.
 
 ---
 
 ## 0. Cài đặt từ artifact tải trên GitHub Actions
 
-Áp dụng cho artifact tải về từ workflow **"Quick Windows exe build"**
-(`build-windows-exe-quick.yml`) hoặc **"Quick Linux binary build"**
-(`build-linux-quick.yml`) — tab **Actions** → chọn workflow → chọn lần chạy
+Áp dụng cho artifact tải về từ workflow **"Build standalone Windows exe"**
+(`build-exe.yml`) hoặc **"Build standalone Linux binary"**
+(`build-linux-exe.yml`) — tab **Actions** → chọn workflow → chọn lần chạy
 đã xong → mục **Artifacts**.
 
-**Lưu ý quan trọng**: GitHub luôn bọc thêm 1 lớp `.zip` ngoài cùng khi tải
-artifact, trong khi 2 workflow này TỰ đóng gói kết quả build thành
-`.zip`/`.tar.gz` riêng trước khi upload — nên artifact tải về có **2 lớp
-nén lồng nhau**, phải giải nén cả 2 lớp mới ra file thực thi.
+Khác với `codebase-memory-mcp`, 2 workflow này upload thẳng file thực thi
+(không tự đóng gói `.zip`/`.tar.gz` trước) — nên artifact tải về **chỉ có 1
+lớp `.zip`** (do GitHub tự bọc), giải nén 1 lần là ra ngay file chạy được.
 
 ### Windows
 
 ```powershell
-# Giải nén lớp ngoài (GitHub) rồi lớp trong (build)
-Expand-Archive codebase-memory-mcp-windows-exe.zip -DestinationPath .
-Expand-Archive codebase-memory-mcp-windows-amd64.zip -DestinationPath .
+Expand-Archive crg-windows-exe.zip -DestinationPath .
 ```
 
-Ra 4 file: `codebase-memory-mcp.exe`, `LICENSE`, `install.ps1`,
-`THIRD_PARTY_NOTICES.md`. Đặt cố định 1 chỗ, ví dụ `D:\tools\codebase-memory-mcp\`.
-
-Kiểm tra chạy được:
+Ra file `crg.exe` duy nhất (không kèm LICENSE/notice — khác với artifact
+của `codebase-memory-mcp`). Đặt cố định 1 chỗ, ví dụ `D:\tools\crg\`.
 
 ```bash
-.\codebase-memory-mcp.exe --version
+.\crg.exe --version
 ```
-
-Không cần cài Python/Node hay bất kỳ dependency nào khác — binary tự chứa
-toàn bộ (frozen/static build).
 
 ### Linux
 
 ```bash
-unzip codebase-memory-mcp-linux-binary.zip
-tar -xzf codebase-memory-mcp-linux-amd64-portable.tar.gz
-chmod +x codebase-memory-mcp
-./codebase-memory-mcp --version
+unzip crg-linux-exe.zip
+chmod +x crg
+./crg --version
 ```
 
-Ra 4 file: `codebase-memory-mcp`, `LICENSE`, `install.sh`,
-`THIRD_PARTY_NOTICES.md`. Binary build **static hoàn toàn** — chạy được
-trên mọi distro Linux, kể cả base image tối giản trong Docker (Debian
-slim, Alpine, distroless...), không cần cài glibc version cụ thể.
+Ra file `crg` duy nhất. Đây là binary PyInstaller frozen (tự chứa Python
+runtime bên trong) — không cần cài Python trên máy chạy, nhưng **không
+static** theo nghĩa glibc như `codebase-memory-mcp` — build trên
+`ubuntu-latest`, nên máy chạy cần glibc tương đương hoặc mới hơn (Ubuntu
+22.04+/Debian 12+ trở lên là an toàn; distro cũ hơn hoặc Alpine/musl có thể
+không chạy được — trường hợp đó cân nhắc dùng `pip install crg` thay vì
+binary frozen).
 
-Ví dụ Dockerfile dùng thẳng binary này:
+### Thay thế: cài qua pip (không cần artifact)
 
-```dockerfile
-FROM debian:bookworm-slim
-COPY codebase-memory-mcp /usr/local/bin/codebase-memory-mcp
-ENV CBM_CACHE_DIR=/tmp/cbm
-ENTRYPOINT ["codebase-memory-mcp"]
+Nếu môi trường có sẵn Python 3.10+, không bắt buộc phải dùng file exe/binary
+— cài thẳng qua PyPI cũng cho CLI tương đương:
+
+```bash
+pip install crg
+crg --version
 ```
 
 ### Sau khi cài xong
 
-Từ đây trở đi, gọi trực tiếp file thực thi theo đường dẫn đã đặt (không cần
-thêm bước nào khác) — chuyển sang mục 2 bên dưới để dùng CLI. Muốn hệ thống
-tự quản lý PATH/cấu hình agent thì chạy thêm `install -y` (mục 5), nhưng
-với hệ thống tích hợp qua CLI thuần tuý (không qua agent) thì **không bắt
-buộc** — chỉ cần trỏ đúng đường dẫn binary khi gọi lệnh.
-
-**Alias ngắn `cbm`**: chạy `install` (hoặc `update`) sẽ tự tạo thêm 1 alias
-tên `cbm` (`cbm.exe` trên Windows) nằm CẠNH `codebase-memory-mcp` trong
-`~/.local/bin/` — gõ `cbm` thay vì gõ đầy đủ `codebase-memory-mcp` cho đỡ
-dài, hành vi giống hệt nhau (POSIX: symlink; Windows: bản copy, tự đồng bộ
-lại mỗi lần `install`/`update`). Từ mục 1 trở đi, tài liệu này dùng `cbm`
-trong mọi ví dụ lệnh — thay bằng `codebase-memory-mcp` (hoặc đường dẫn đầy
-đủ tới binary) nếu bạn chưa chạy `install` để tạo alias.
+Gọi trực tiếp file thực thi (hoặc lệnh `crg` nếu cài qua pip) theo đường dẫn
+đã đặt — chuyển sang mục 1 bên dưới để dùng CLI.
 
 ---
 
-## 1. Cấu trúc lệnh gốc
+## 1. Nhóm lệnh
 
-```
-cbm                       Chạy MCP server qua stdio (mặc định, không kèm subcommand)
-cbm cli <tool> [args]     Gọi 1 MCP tool trực tiếp — DÙNG CÁI NÀY CHO AUTOMATION
-cbm install [-y|-n] [--force] [--dry-run] [--reset-indexes]
-cbm uninstall [-y|-n] [--dry-run]
-cbm update [-y|-n]
-cbm config <list|get|set|reset> [key] [value]
-cbm hook-augment
-cbm --version
-cbm --help
-```
+`crg` có 2 nhóm lệnh khác biệt quan trọng cho automation:
 
-(`cbm` = alias của `codebase-memory-mcp`, xem mục 0 — dùng tên nào cũng
-được, hành vi giống hệt.)
-
-Cờ toàn cục:
-- `--ui=true|false` — bật/tắt HTTP graph visualization (được lưu lại)
-- `--port=N` — port cho UI (mặc định 9749, được lưu lại)
-- `--profile` — bật CPU profiling
+- **Nhóm build/quản lý** (`build`, `update`, `status`, `postprocess`, `watch`,
+  `forget`, `register`/`unregister`/`repos`, `daemon`...) — hầu hết in **text
+  thường** ra stdout, trừ khi có cờ `--json` riêng.
+- **Nhóm graph-tool trực tiếp** (`query`, `search`, `impact`, `flows`, `flow`,
+  `communities`, `community`, `architecture`, `large-functions`, `refactor`)
+  — **LUÔN in đúng 1 JSON object ra stdout, không cần cờ gì thêm**. Đây là
+  nhóm lệnh phù hợp nhất để tích hợp CLI vào pipeline tự động, vì output
+  parse được ngay không cần đoán format.
 
 ---
 
-## 2. `cli <tool_name>` — cách gọi 1 tool trực tiếp (quan trọng nhất cho automation)
-
-### 2.1. 4 cách truyền tham số (theo thứ tự ưu tiên)
+## 2. Build & quản lý graph
 
 ```bash
-# 1) --args-file: đọc JSON từ file
-cbm cli index_repository --args-file args.json
-
-# 2) --flag value (khuyến nghị cho script đơn giản)
-cbm cli index_repository --repo-path /path/to/repo --mode full
-
-# 3) Piped stdin (JSON thuần, không cần escape qua shell) — TỐT NHẤT cho automation
-echo '{"repo_path":"/path/to/repo","mode":"full"}' | cbm cli index_repository
-
-# 4) Raw JSON làm argument — ĐÃ DEPRECATED, vẫn hoạt động nhưng in warning ra stderr
-cbm cli index_repository '{"repo_path":"/path/to/repo"}'
+crg build [--repo PATH] [-q] [--skip-flows] [--skip-postprocess] [--data-dir PATH]
+crg update [--repo PATH] [--base REF] [-q] [--brief] [--verify] [--skip-flows] [--skip-postprocess] [--data-dir PATH]
+crg postprocess [--repo PATH] [--no-flows] [--no-communities] [--no-fts] [--data-dir PATH]
+crg watch [--repo PATH] [--data-dir PATH]
+crg forget PATH [PATH...] [--repo PATH] [--dry-run] [--data-dir PATH]
 ```
 
-Tên field trong `--flag` tự động chuyển `snake_case` (JSON schema) sang
-`kebab-case` (CLI flag): field `repo_path` → cờ `--repo-path`.
+- `build`: full rebuild (parse lại toàn bộ). Output mặc định (không `-q`):
+  `Full build: <N> files, <N> nodes, <N> edges (postprocess=full)`.
+- `update`: incremental (chỉ file thay đổi theo git diff). `--brief` in thêm
+  risk summary + Token Savings panel.
+- Không có `--json` cho `build`/`update` — sau khi build/update, gọi
+  `crg status --json` để lấy số liệu dạng structured.
+- Exit code: `0` = thành công, `1` = lỗi (raise SystemExit(1)/sys.exit(1) rải
+  rác trong toàn bộ CLI — quy ước nhất quán).
 
-### 2.2. Xem schema đầy đủ của 1 tool
+### `status` — trạng thái graph, có sẵn `--json`
 
 ```bash
-cbm cli <tool_name> --help
+crg status --repo PATH --json
 ```
 
-In ra toàn bộ flag, type, required/optional, description — luôn đúng với
-bản build hiện tại (tự sinh từ JSON schema nội bộ, không lệch so với code).
-
-### 2.3. Output format — **PHẢI ĐỌC KỸ PHẦN NÀY**
-
-| Cờ | Hành vi |
-|---|---|
-| (mặc định, không cờ) | Bóc `content[0].text` từ JSON response MCP, in ra `stdout` (nếu OK) hoặc `stderr` (nếu lỗi). Exit code: **0 nếu OK, 1 nếu `isError:true`**. |
-| `--json` | In **nguyên JSON MCP response đầy đủ** ra `stdout`. **Exit code LUÔN LÀ 0** bất kể tool có lỗi hay không — phải tự parse field `isError` trong JSON để biết thành/bại. |
-
-**Khuyến nghị cho hệ thống automation**: dùng `--json`, tự parse response,
-kiểm tra `isError` — đừng dựa vào exit code khi dùng `--json`.
-
-```bash
-result=$(echo '{"repo_path":"/path/to/repo"}' | cbm cli index_repository --json)
-is_error=$(echo "$result" | jq -r '.isError // false')
-if [ "$is_error" = "true" ]; then
-  echo "FAILED: $(echo "$result" | jq -r '.content[0].text')" >&2
-  exit 1
-fi
+```json
+{
+  "nodes": 12345, "edges": 45678, "files": 890,
+  "languages": ["python", "go"],
+  "last_updated": "...",
+  "vcs": "git",
+  "built_on_branch": "main", "built_at_commit": "<sha>",
+  "current_branch": "main", "current_sha": "<sha>"
+}
 ```
-
-Cờ khác: `--progress` (in tiến độ ra stderr, hữu ích cho `index_repository` trên repo lớn).
 
 ---
 
-## 3. Danh sách đầy đủ các tool (`cli <tool_name>`)
-
-| Tool | Mục đích | Required params |
-|---|---|---|
-| `index_repository` | Index (hoặc re-index) 1 repo vào graph. Có mode `full`/`moderate`/`fast`/`cross-repo-intelligence` | `repo_path` |
-| `search_graph` | Tìm function/class/route/variable — dùng thay grep | `project` |
-| `query_graph` | Chạy Cypher query tuỳ ý trên graph | `query`, `project` |
-| `trace_path` | Trace callers/callees, data flow, hoặc cross-service (HTTP/async/gRPC...) | `function_name`, `project` |
-| `get_code_snippet` | Lấy source code của 1 symbol theo qualified_name | `qualified_name`, `project` |
-| `get_graph_schema` | Lấy danh sách node label + edge type | `project` |
-| `get_architecture` | Tổng quan kiến trúc (structure/dependencies/routes/hotspots/clusters...) | `project` |
-| `search_code` | Grep + enrich bằng graph (dedup theo function, rank theo mức quan trọng) | `pattern`, `project` |
-| `list_projects` | Liệt kê project đã index | — |
-| `delete_project` | Xoá 1 project khỏi index | `project` |
-| `index_status` | Trạng thái index: số node/edge, coverage report (file bị skip/parse-partial) | `project` |
-| `detect_changes` | Phân tích tác động thay đổi code (risk-scored) | `project` |
-| `manage_adr` | Đọc/ghi Architecture Decision Record | `project` |
-| `ingest_traces` | Nạp runtime trace để bổ sung graph | `traces`, `project` |
-
-`project` = tên project được suy ra từ `repo_path` khi index (thường là tên
-thư mục, có thể override qua `name` khi gọi `index_repository`). Dùng
-`list_projects` để lấy tên chính xác nếu không chắc.
-
----
-
-## 4. Quy trình tự động hoá điển hình
+## 3. `detect-changes` — phân tích tác động thay đổi (read-only, không re-parse)
 
 ```bash
-# 1. Index lần đầu (hoặc update — tool tự phát hiện incremental vs full)
-echo '{"repo_path":"/repo","mode":"full"}' | cbm cli index_repository --json
-
-# 2. Kiểm tra trạng thái / coverage
-echo '{"project":"repo"}' | cbm cli index_status --json
-
-# 3. Truy vấn trong pipeline (ví dụ: review PR)
-echo '{"project":"repo","scope":"changed","base_branch":"main"}' \
-  | cbm cli detect_changes --json
-
-# 4. Trace impact / tìm caller
-echo '{"function_name":"processPayment","project":"repo","mode":"calls"}' \
-  | cbm cli trace_path --json
+crg detect-changes [--base HEAD~1] [--repo PATH] [--churn] [--verify] [--brief]
 ```
 
-Với repo lớn, thêm biến môi trường `CBM_INDEX_SUPERVISOR=1` (mặc định đã
-bật khi chạy binary thật — chỉ tắt khi debug) để `index_repository` chạy
-trong subprocess con, tránh out-of-memory làm chết cả process CLI.
+- **Không `--brief`**: in **JSON đầy đủ** ra stdout (`json.dumps(result, indent=2)`)
+  — dùng cái này cho automation.
+- **`--brief`**: in risk summary dạng text (Token Savings panel) — cho người đọc.
+- Không re-parse code — chỉ phân tích trên graph đã có sẵn. Muốn re-parse
+  + phân tích cùng lúc, dùng `update --brief`.
+- `--churn`: cộng thêm điểm risk theo tần suất commit 90 ngày gần nhất
+  (chỉnh qua `CRG_CHURN_WINDOW_DAYS`).
+
+```bash
+crg detect-changes --base main --repo /path/to/repo | jq '.risk_summary'
+```
 
 ---
 
-## 5. Biến môi trường liên quan tới CLI/automation
+## 4. Nhóm lệnh graph-tool trực tiếp — luôn JSON, không cần cờ
+
+Tất cả các lệnh dưới đây gọi thẳng hàm tool nội bộ và
+**in `json.dumps(result, indent=2, default=str)` — không có option nào khác**.
+
+```bash
+crg query <pattern> <target> [--repo PATH]
+  # pattern: callers_of | callees_of | imports_of | importers_of |
+  #          children_of | tests_for | inheritors_of | file_summary
+
+crg impact [--files F1 F2...] [--depth 2] [--max-results 500] [--base HEAD~1] [--repo PATH]
+
+crg search <query> [--kind File|Class|Function|Type|Test] [--limit 20] [--repo PATH]
+
+crg flows [--sort criticality|depth|node_count|file_count|name] [--limit 50] [--kind K] [--repo PATH]
+crg flow (--id N | --name NAME) [--source] [--repo PATH]
+
+crg communities [--sort size|cohesion|name] [--min-size 0] [--repo PATH]
+crg community (--id N | --name NAME) [--members] [--repo PATH]
+
+crg architecture [--detail-level minimal|standard] [--repo PATH]
+
+crg large-functions [--min-lines 50] [--kind Function|Class|File|Test] [--path SUBSTR] [--limit 50] [--repo PATH]
+
+crg refactor <rename|dead_code|suggest> [--old-name X] [--new-name Y] [--kind Function|Class] [--path SUBSTR] [--repo PATH]
+```
+
+Ví dụ pipeline thực tế:
+
+```bash
+# Ai gọi hàm này? (dùng cho impact analysis khi review PR)
+crg query callers_of processPayment --repo /repo | jq '.results'
+
+# Blast radius của các file vừa đổi trong PR
+crg impact --files src/payment.py src/order.py --depth 2 --repo /repo
+
+# Tổng quan kiến trúc (cho báo cáo tự động)
+crg architecture --detail-level standard --repo /repo
+```
+
+---
+
+## 5. Cài đặt / cấu hình agent (`install`)
+
+```bash
+crg install [--platform NAME] [--dry-run] [--yes] [--repo PATH]
+```
+
+`--platform`: `codex`, `claude` (= Claude Code CLI, KHÔNG phải Claude Desktop
+app), `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`,
+`gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`,
+`all` (mặc định).
+
+Ghi `.mcp.json` vào **thư mục repo** (không phải config global) khi target
+là `claude`/`claude-code`.
+
+---
+
+## 6. Multi-repo registry (`register`/`unregister`/`repos`)
+
+```bash
+crg register <path> [--alias NAME]
+crg unregister <path_or_alias>
+crg repos
+```
+
+`repos` in danh sách text (`  <path>  (<alias>)`), không có `--json` riêng.
+
+---
+
+## 7. Biến môi trường liên quan CLI/automation
 
 | Biến | Ý nghĩa |
 |---|---|
-| `CBM_IGNORE_FILE` | Đường dẫn tới ignore file dùng thay `.cbmignore` mặc định — có thể đặt ngoài repo, path tương đối resolve theo `repo_path` |
-| `CBM_CACHE_DIR` | Thư mục cache/data (mặc định `~/.cache/codebase-memory-mcp`) — hữu ích khi chạy trong container không có `$HOME` ghi được |
-| `CBM_LOG_LEVEL` | Mức log (áp dụng trước dòng log đầu tiên) |
-| `CBM_PROFILE` | Bật CPU profiling |
-| `CBM_INDEX_SUPERVISOR` | `0` để tắt cơ chế supervisor subprocess khi index (mặc định bật) — chỉ tắt lúc debug |
+| `CRG_IGNORE_FILE` | Path tới ignore file thay `.crgignore` mặc định — absolute path dùng thẳng, relative resolve theo repo root. Đặt được ở ngoài repo, dùng chung cho nhiều repo. |
+| `CRG_CHURN_WINDOW_DAYS` | Số ngày tính change-frequency cho `detect-changes --churn` |
+| `CRG_TOOLS` | Danh sách tool expose khi chạy `serve`/`mcp` (comma-separated), tương đương cờ `--tools` |
+| `CRG_RECURSE_SUBMODULES` | Fallback mặc định cho tham số `recurse_submodules` khi build |
 
 ---
 
-## 6. Exit code tổng hợp
+## 8. Đầu ra khi PIPE / redirect (không phải terminal tương tác)
 
-| Lệnh | Exit code |
+Từ bản build gần nhất, `crg` tự ép `stdout`/`stderr` sang UTF-8
+(`errors="replace"`) ngay từ đầu `main()` — an toàn khi gọi qua pipe hoặc
+subprocess (không còn crash `UnicodeEncodeError` trên Windows console non-UTF8).
+
+---
+
+## 9. Exit code tổng hợp
+
+| Trường hợp | Exit code |
 |---|---|
-| `cli <tool>` (mặc định, không `--json`) | 0 = OK, 1 = `isError:true` trong response |
-| `cli <tool> --json` | Luôn 0 nếu process chạy được tới cuối — **phải tự check `isError` trong JSON** |
-| `cli <tool>` với tool name không tồn tại | 1, in `error: unknown tool '<name>'` ra stderr |
-| `install`/`uninstall`/`update` | 0 = thành công; khác 0 khi có lỗi (ví dụ user từ chối prompt khi không có `-y`) |
-
----
-
-## 7. Lưu ý về config runtime (`config` subcommand)
-
-```bash
-cbm config list
-cbm config get <key>
-cbm config set <key> <value>
-cbm config reset <key>
-```
-
-Dùng để đọc/sửa các setting đã lưu lại (persisted) như `ui_enabled`, `ui_port`.
+| Lệnh chạy thành công | 0 |
+| Lỗi runtime (repo không tồn tại, git lỗi, tool exception...) | 1 (qua `sys.exit(1)`/`SystemExit(1)`) |
+| `--version` | 0, in version rồi thoát ngay |
